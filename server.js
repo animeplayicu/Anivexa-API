@@ -3,6 +3,7 @@ import http from "node:http";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { Readable } from "node:stream";
 import worker from "./index.js";
 
 const PORT  = Number(process.env.PORT) || 4000;
@@ -64,14 +65,39 @@ const server = http.createServer(async (req, res) => {
     res.statusCode = response.status;
     for (const [k, v] of response.headers) res.setHeader(k, v);
 
-    const buf = await response.arrayBuffer();
-    res.end(Buffer.from(buf));
+    if (response.body) {
+      if (typeof Readable.fromWeb === "function") {
+        const nodeStream = Readable.fromWeb(response.body);
+        nodeStream.on("error", () => {
+          if (!res.destroyed) res.destroy();
+        });
+        res.on("close", () => {
+          if (!nodeStream.destroyed) nodeStream.destroy();
+        });
+        nodeStream.pipe(res);
+      } else {
+        const buf = await response.arrayBuffer();
+        res.end(Buffer.from(buf));
+      }
+    } else {
+      res.end();
+    }
   } catch (err) {
-    console.error("Unhandled error:", err);
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ error: err.message }));
+    if (!res.headersSent) {
+      res.statusCode = 500;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: err.message }));
+    }
   }
+});
+
+process.on("uncaughtException", (err) => {
+  if (err?.code === "ECONNRESET" || err?.code === "EPIPE") return;
+  console.error("Uncaught exception:", err);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
 });
 
 server.listen(PORT, () => {

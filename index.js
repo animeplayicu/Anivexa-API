@@ -17,6 +17,7 @@ import animeonsenHandler           from "./providers/animeonsen.js";
 import { getEpisodesResponse, getFilteredEpisodesResponse } from "./core/episode-cache.js";
 import { resolveProviders }         from "./core/episode-strategy.js";
 import { getAsync, setAsync, isFresh, mapTTL, WATCH_TTL, _CACHE_ENABLED } from "./core/smartcache.js";
+import proxyHandler from "./proxy/_worker.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -79,6 +80,10 @@ export default {
           "Access-Control-Allow-Headers": "*",
         },
       });
+    }
+
+    if (path === "/proxy" || path.startsWith("/proxy/")) {
+      return proxyHandler.fetch(request, env);
     }
 
     let m = path.match(/^\/map\/(\d+)\/?$/);
@@ -157,6 +162,21 @@ export default {
     if (m) {
       const [, id, audio, ep] = m;
       return reanimeHandler.fetch(rewriteRequest(request, `/stream/${id}/${audio}/${ep}`));
+    }
+
+    m = path.match(/^\/stream\/anikoto\/(\d+)\/(sub|dub)\/(\d+)\/?$/);
+    if (m) {
+      return anikotoHandler.fetch(request);
+    }
+
+    m = path.match(/^\/stream\/aniwaves\/(\d+)\/(sub|dub)\/(\d+)\/?$/);
+    if (m) {
+      return aniwavesHandler.fetch(request);
+    }
+
+    m = path.match(/^\/stream\/animegg\/(\d+)\/(sub|dub)\/(\d+)\/?$/);
+    if (m) {
+      return animeggHandler.fetch(request);
     }
 
     m = path.match(/^\/watch\/anikoto\/(\d+)\/(sub|dub)\/anikoto-(\d+)\/?$/);

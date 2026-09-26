@@ -439,12 +439,14 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
 
     if (hlsSources.length) {
       for (const source of hlsSources) {
+        const ref = extracted?.origin ? `${extracted.origin}/` : `${new URL(embedUrl).origin}/`;
         const streamObj = {
           url: source.url,
+          proxied_url: `/proxy?url=${encodeURIComponent(source.url)}&ref=${encodeURIComponent(ref)}`,
           type: "hls",
           server: item.name,
           embedUrl,
-          referer: extracted?.origin ? `${extracted.origin}/` : `${new URL(embedUrl).origin}/`,
+          referer: ref,
           subtitles: itemSubs,
           priority: streams.length ? 4 : 5,
           isActive: streams.length === 0
@@ -505,11 +507,15 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
     stream.isActive = index === 0;
   });
 
+  const topStream = streams.find((s) => s.type === "hls") || streams[0];
+
   return jsonResponse({
     anilistId: parseInt(anilistId),
     malId: malIdNum,
     episode: epNum,
     audio,
+    stream_url: topStream?.url || null,
+    proxied_stream_url: topStream?.proxied_url || topStream?.url || null,
     streams,
     subtitles,
     downloads,
@@ -524,6 +530,21 @@ function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+  });
+}
+
+async function handleStream(anilistId, audio, epNum) {
+  const watchResp = await handleWatch(anilistId, audio, epNum);
+  const data = await watchResp.json();
+  const target = data.proxied_stream_url || data.stream_url;
+  if (!target) return jsonResponse({ error: "Stream not found" }, 404);
+  return new Response(null, {
+    status: 302,
+    headers: {
+      "Location": target,
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store"
+    }
   });
 }
 
@@ -544,6 +565,9 @@ export default {
     try {
       let m = path.match(/^\/watch\/anikoto\/(\d+)\/(sub|dub)\/anikoto-(\d+)\/?$/);
       if (m) return await handleWatch(m[1], m[2], parseInt(m[3]));
+
+      m = path.match(/^\/stream\/anikoto\/(\d+)\/(sub|dub)\/(\d+)\/?$/);
+      if (m) return await handleStream(m[1], m[2], parseInt(m[3]));
 
       m = path.match(/^\/episodes\/anikoto\/(\d+)\/?$/);
       if (m) {

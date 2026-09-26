@@ -98,18 +98,23 @@ async function scrapeEpisodeWatch(epSlug, audio) {
   }
   const results = await Promise.allSettled(tabs.map(async (tab, i) => {
     const sources = await scrapeEmbed(tab.embedId);
-    const streams = sources.map((s, j) => ({
-      url: s.url,
-      type: s.url.includes(".m3u8") ? "hls" : "mp4",
-      quality: s.quality,
-      backup: s.backup,
-      audio: tab.normalized,
-      server: tab.server,
-      embed: tab.embedUrl,
-      referer: `${new URL(tab.embedUrl).origin}/`,
-      priority: tabs.length - i,
-      isActive: i === 0 && j === 0,
-    }));
+    const streams = sources.map((s, j) => {
+      const isPlayable = s.url.includes(".m3u8") || s.url.includes(".mp4");
+      const ref = `${new URL(tab.embedUrl).origin}/`;
+      return {
+        url: s.url,
+        proxied_url: isPlayable ? `/proxy?url=${encodeURIComponent(s.url)}&ref=${encodeURIComponent(ref)}` : undefined,
+        type: s.url.includes(".m3u8") ? "hls" : "mp4",
+        quality: s.quality,
+        backup: s.backup,
+        audio: tab.normalized,
+        server: tab.server,
+        embed: tab.embedUrl,
+        referer: ref,
+        priority: tabs.length - i,
+        isActive: i === 0 && j === 0,
+      };
+    });
     streams.push({
       url: tab.embedUrl,
       type: "embed",
@@ -209,7 +214,33 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
   const ep = episodes.find((e) => e.number === providerEp);
   if (!ep) return json({ error: `AnimeGG episode ${providerEp} not found` }, 404);
   const watch = await scrapeEpisodeWatch(ep.epSlug, audio);
-  return json({ anilistId: Number(anilistId), episode: Number(epNum), providerEpisode: providerEp, audio, title: watch.title, streams: watch.streams });
+  const topStream = watch.streams.find((s) => s.type === "hls" || s.type === "mp4") || watch.streams[0];
+
+  return json({
+    anilistId: Number(anilistId),
+    episode: Number(epNum),
+    providerEpisode: providerEp,
+    audio,
+    title: watch.title,
+    stream_url: topStream?.url || null,
+    proxied_stream_url: topStream?.proxied_url || topStream?.url || null,
+    streams: watch.streams,
+  });
+}
+
+async function handleStream(anilistId, audio, epNum) {
+  const watchResp = await handleWatch(anilistId, audio, epNum);
+  const data = await watchResp.json();
+  const target = data.proxied_stream_url || data.stream_url;
+  if (!target) return json({ error: "Stream not found" }, 404);
+  return new Response(null, {
+    status: 302,
+    headers: {
+      "Location": target,
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store",
+    },
+  });
 }
 
 export default {
@@ -221,6 +252,10 @@ export default {
     try {
       const m = url.pathname.match(/^\/watch\/animegg\/(\d+)\/(sub|dub)\/animegg-(\d+)\/?$/);
       if (m) return await handleWatch(m[1], m[2], m[3]);
+
+      const streamMatch = url.pathname.match(/^\/stream\/animegg\/(\d+)\/(sub|dub)\/(\d+)\/?$/);
+      if (streamMatch) return await handleStream(streamMatch[1], streamMatch[2], streamMatch[3]);
+
       return json({ error: "Not found" }, 404);
     } catch (err) {
       return json({ error: err.message, "Raw-ERROR": err.rawBody ?? null, stack: err.stack }, 500);

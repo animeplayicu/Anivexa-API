@@ -247,26 +247,36 @@ async function handleWatch3(anilistId, audio, epNum, origin) {
   }
   const { title: title2, slug, watchData, stream, server, servers, streams, failedServers } = resolved;
   const seenStreamUrls = new Set();
-  const cleanStreams = streams.map(({ server: source, stream: item, index }) => ({
-    server: source.serverName,
-    audio: source.dataType,
-    index,
-    url: item.url,
-    type: "hls",
-    embed: source.dataLink,
-    key: item.key ?? null,
-    playlist_key: item.playlist_key ?? item.key ?? null,
-    subtitles: item.subtitles ?? [],
-    thumbnails_vtt: item.thumbnails_vtt ?? null,
-    video_title: item.video_title ?? null,
-    intro: item.intro_chapter ?? null,
-    outro: item.outro_chapter ?? null
-  })).filter((item) => {
+  const cleanStreams = streams.map(({ server: source, stream: item, index }) => {
+    const key = item.playlist_key ?? item.key ?? null;
+    let proxied = `/proxy?url=${encodeURIComponent(item.url)}&ref=${encodeURIComponent("https://flixcloud.cc/")}`;
+    if (key) proxied += `&key=${encodeURIComponent(key)}`;
+    return {
+      server: source.serverName,
+      audio: source.dataType,
+      index,
+      url: item.url,
+      proxied_url: proxied,
+      type: "hls",
+      embed: source.dataLink,
+      key,
+      playlist_key: key,
+      subtitles: item.subtitles ?? [],
+      thumbnails_vtt: item.thumbnails_vtt ?? null,
+      video_title: item.video_title ?? null,
+      intro: item.intro_chapter ?? null,
+      outro: item.outro_chapter ?? null
+    };
+  }).filter((item) => {
     if (seenStreamUrls.has(item.url)) return false;
     seenStreamUrls.add(item.url);
     return true;
   });
   const embeds = servers.map((s) => ({ name: s.serverName, type: s.dataType, url: s.dataLink }));
+  const topKey = stream.playlist_key || stream.key || "";
+  let topProxied = `/proxy?url=${encodeURIComponent(stream.url)}&ref=${encodeURIComponent("https://flixcloud.cc/")}`;
+  if (topKey) topProxied += `&key=${encodeURIComponent(topKey)}`;
+
   return json3({
     anime: title2,
     slug,
@@ -274,6 +284,7 @@ async function handleWatch3(anilistId, audio, epNum, origin) {
     audio,
     server,
     stream_url: stream.url,
+    proxied_stream_url: topProxied,
     streams: cleanStreams,
     subtitles: stream.subtitles,
     thumbnails_vtt: stream.thumbnails_vtt,
@@ -300,10 +311,14 @@ async function handleStream3(anilistId, audio, epNum) {
   } catch (e) {
     return json3({ error: e.message, "Raw-ERROR": e.rawBody ?? null, stack: e.stack }, e.status ?? 500);
   }
+  const sKey = resolved.stream.playlist_key || resolved.stream.key || "";
+  let loc = `/proxy?url=${encodeURIComponent(resolved.stream.url)}&ref=${encodeURIComponent("https://flixcloud.cc/")}`;
+  if (sKey) loc += `&key=${encodeURIComponent(sKey)}`;
+
   return new Response(null, {
     status: 302,
     headers: {
-      "Location": resolved.stream.url,
+      "Location": loc,
       "Access-Control-Allow-Origin": "*",
       "Cache-Control": "no-store"
     }

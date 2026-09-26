@@ -418,8 +418,14 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
     intro ??= skipRange(skip.intro);
     outro ??= skipRange(skip.outro);
     for (const stream of item.direct) {
+      const isPlayable = stream.type === "hls" || stream.url.includes(".m3u8") || stream.url.includes(".mp4");
+      const proxied = isPlayable
+        ? `/proxy?url=${encodeURIComponent(stream.url)}&ref=${encodeURIComponent(sourceReferer)}`
+        : undefined;
+
       streams.push({
         url: stream.url,
+        proxied_url: proxied,
         type: stream.type,
         server: item.server.server,
         referer: sourceReferer,
@@ -441,6 +447,8 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
     const failure = settled.find((item) => item.error)?.error;
     throw failure ?? new Error(`AniWaves sources unavailable for episode ${epNum}`);
   }
+  const topStream = streams.find((s) => s.type === "hls") || streams[0];
+
   return json({
     anilistId: Number(anilistId),
     episode: Number(epNum),
@@ -448,7 +456,24 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
     audio,
     intro,
     outro,
+    stream_url: topStream?.url || null,
+    proxied_stream_url: topStream?.proxied_url || topStream?.url || null,
     streams,
+  });
+}
+
+async function handleStream(anilistId, audio, epNum) {
+  const watchResp = await handleWatch(anilistId, audio, epNum);
+  const data = await watchResp.json();
+  const target = data.proxied_stream_url || data.stream_url;
+  if (!target) return json({ error: "Stream not found" }, 404);
+  return new Response(null, {
+    status: 302,
+    headers: {
+      "Location": target,
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store",
+    },
   });
 }
 
@@ -468,6 +493,10 @@ export default {
     try {
       const match = url.pathname.match(/^\/watch\/aniwaves\/(\d+)\/(sub|dub)\/aniwaves-(\d+)\/?$/);
       if (match) return await handleWatch(match[1], match[2], match[3]);
+
+      const streamMatch = url.pathname.match(/^\/stream\/aniwaves\/(\d+)\/(sub|dub)\/(\d+)\/?$/);
+      if (streamMatch) return await handleStream(streamMatch[1], streamMatch[2], streamMatch[3]);
+
       return json({ error: "Not found" }, 404);
     } catch (error) {
       return json({ error: error.message, "Raw-ERROR": error.rawBody ?? null, stack: error.stack }, 500);
