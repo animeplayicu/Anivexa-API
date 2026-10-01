@@ -1,36 +1,63 @@
 import { getMedia } from "../core/anilist.js";
 import {
   attr,
-  buildTitles,
   decodeEntities,
+  diceCoeff,
   episodeMeta,
   expectedCount,
   fetchHtml,
-  findTopSlugs,
-  getPrequelOffset,
   json,
-  selectSeries,
+  norm,
   stripTags,
 } from "../core/new-provider-utils.js";
 import { get, set, isFresh, SHOW_IDENTITY_TTL } from "../core/smartcache.js";
+import { getMappedSlug } from "../mappings/animegg.js";
 
 const BASE = "https://www.animegg.org";
 
+// In-memory 5-minute cache for series episode lists to avoid redundant scrapes
+const seriesEpisodeCache = new Map();
+
 async function search(query) {
-  const html = await fetchHtml(`${BASE}/search/?q=${encodeURIComponent(query)}`);
-  const results = [];
-  for (const m of html.matchAll(/<a\b[^>]*class=["'][^"']*\bmse\b[^"']*["'][^>]*>[\s\S]*?<\/a>/gi)) {
-    const tag = m[0].match(/<a\b[^>]*>/i)?.[0] ?? "";
-    const href = attr(tag, "href");
-    const slug = href.match(/^\/series\/([^/?#]+)/)?.[1];
-    if (!slug) continue;
-    const strong = m[0].match(/<strong[^>]*>([\s\S]*?)<\/strong>/i)?.[1];
-    results.push({ slug, text: strong ? stripTags(strong) : slug.replace(/-/g, " ") });
+  if (!query || !query.trim()) return [];
+  try {
+    const html = await fetchHtml(`${BASE}/search/?q=${encodeURIComponent(query.trim())}`);
+    const results = [];
+    const matches = html.matchAll(/<a\b[^>]*class=["'][^"']*\bmse\b[^"']*["'][^>]*>[\s\S]*?<\/a>/gi);
+    for (const m of matches) {
+      const raw = m[0];
+      const slug = raw.match(/href=["']\/series\/([^"'/?#]+)/i)?.[1];
+      if (!slug) continue;
+      const titleMatch = raw.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i)?.[1];
+      const title = titleMatch ? decodeEntities(stripTags(titleMatch)) : slug.replace(/-/g, " ");
+      const altMatch = raw.match(/Alt Titles\s*:\s*([^<]+)/i)?.[1];
+      const altTitles = altMatch ? decodeEntities(altMatch).split(/[,;]/).map((s) => s.trim()).filter(Boolean) : [];
+      const epMatch = raw.match(/Episodes\s*:\s*(\d+)/i)?.[1];
+      const epCount = epMatch ? parseInt(epMatch, 10) : null;
+      const statusMatch = raw.match(/Status\s*:\s*([^<]+)/i)?.[1]?.trim() || "";
+
+      results.push({
+        slug,
+        title,
+        altTitles,
+        epCount,
+        status: statusMatch,
+      });
+    }
+    return results;
+  } catch {
+    return [];
   }
-  return results;
 }
 
 async function scrapeSeries(slug) {
+  if (seriesEpisodeCache.has(slug)) {
+    const cached = seriesEpisodeCache.get(slug);
+    if (Date.now() - cached.ts < 300000) {
+      return cached.episodes;
+    }
+  }
+
   const html = await fetchHtml(`${BASE}/series/${slug}`);
   const episodes = [];
   for (const m of html.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)) {
@@ -42,7 +69,7 @@ async function scrapeSeries(slug) {
     const rangeMatch = strong.match(/(\d+)-(\d+)\s*$/);
     const numMatch = rangeMatch || strong.match(/(\d+)\s*$/);
     if (!numMatch || !href) continue;
-    const number = parseInt(numMatch[1]);
+    const number = parseInt(numMatch[1], 10);
     const title = stripTags(block.match(/<i\b[^>]*class=["'][^"']*anititle[^"']*["'][^>]*>([\s\S]*?)<\/i>/i)?.[1] ?? "") || strong;
     const audio = [];
     if (/\bbtn-subbed\b/.test(block)) audio.push("sub");
@@ -51,7 +78,9 @@ async function scrapeSeries(slug) {
   }
   episodes.sort((a, b) => a.number - b.number);
   const seen = new Set();
-  return episodes.filter((e) => seen.has(e.number) ? false : (seen.add(e.number), true));
+  const deduped = episodes.filter((e) => seen.has(e.number) ? false : (seen.add(e.number), true));
+  seriesEpisodeCache.set(slug, { episodes: deduped, ts: Date.now() });
+  return deduped;
 }
 
 async function scrapeEmbed(embedId) {
@@ -99,11 +128,9 @@ async function scrapeEpisodeWatch(epSlug, audio) {
   const results = await Promise.allSettled(tabs.map(async (tab, i) => {
     const sources = await scrapeEmbed(tab.embedId);
     const streams = sources.map((s, j) => {
-      const isPlayable = s.url.includes(".m3u8") || s.url.includes(".mp4");
       const ref = `${new URL(tab.embedUrl).origin}/`;
       return {
         url: s.url,
-        proxied_url: isPlayable ? `/proxy?url=${encodeURIComponent(s.url)}&ref=${encodeURIComponent(ref)}` : undefined,
         type: s.url.includes(".m3u8") ? "hls" : "mp4",
         quality: s.quality,
         backup: s.backup,
@@ -129,19 +156,56 @@ async function scrapeEpisodeWatch(epSlug, audio) {
   return { title, streams: results.flatMap((r) => r.status === "fulfilled" ? r.value : []) };
 }
 
-async function searchFn(query) {
-  const r1 = await search(query);
-  // AnimeGG needs a plain alphanumeric token to surface all season variants.
-  // "Re:Zero" → 0 results; "ReZero" → all slugs including season-4.
-  const compact = query.split(/\s+/)[0].replace(/[^a-zA-Z0-9]/g, "");
-  if (compact.length >= 4 && compact.toLowerCase() !== query.toLowerCase()) {
-    try {
-      const r2 = await search(compact);
-      const seen = new Set(r1.map(r => r.slug));
-      r2.forEach(r => { if (!seen.has(r.slug)) r1.push(r); });
-    } catch {}
+function scoreCandidate(candidate, targetTitles, expected) {
+  const candStrings = [
+    candidate.title,
+    candidate.slug.replace(/-/g, " "),
+    ...(candidate.altTitles || []),
+  ];
+
+  let bestTitleScore = 0;
+  for (const target of targetTitles) {
+    if (!target) continue;
+    for (const cand of candStrings) {
+      if (!cand) continue;
+      const d = diceCoeff(target, cand);
+      if (d > bestTitleScore) bestTitleScore = d;
+    }
   }
-  return r1;
+
+  // Deprioritize dedicated -dub slugs
+  if (candidate.slug.endsWith("-dub")) {
+    bestTitleScore *= 0.7;
+  }
+
+  // Season number consistency
+  const targetHasSeasonNum = targetTitles.some((t) =>
+    /\b(season\s*[2-9]|\d+nd\s*season|\d+rd\s*season|\d+th\s*season|part\s*[2-9])\b/i.test(t)
+  );
+  const candHasSeasonNum =
+    /\b(season\s*[2-9]|\d+nd\s*season|\d+rd\s*season|\d+th\s*season|part\s*[2-9])\b/i.test(candidate.title) ||
+    /-(season-[2-9]|[2-9]nd-season|[2-9]rd-season|[2-9]th-season|part-[2-9])/i.test(candidate.slug);
+
+  if (!targetHasSeasonNum && candHasSeasonNum) {
+    bestTitleScore *= 0.2;
+  } else if (targetHasSeasonNum && !candHasSeasonNum) {
+    bestTitleScore *= 0.3;
+  }
+
+  // Episode count matching bonus / penalty
+  let countScore = 1.0;
+  if (expected && candidate.epCount && candidate.epCount > 0) {
+    if (candidate.epCount === expected) {
+      countScore = 1.25;
+    } else if (Math.abs(candidate.epCount - expected) <= 2) {
+      countScore = 1.05;
+    } else {
+      const minMultiplier = bestTitleScore >= 0.85 ? 0.75 : 0.4;
+      countScore = Math.max(minMultiplier, 1 - Math.abs(candidate.epCount - expected) / Math.max(expected, candidate.epCount));
+    }
+  }
+
+  return bestTitleScore * countScore;
 }
 
 async function resolveSeries(anilistId, ctx = {}) {
@@ -150,16 +214,84 @@ async function resolveSeries(anilistId, ctx = {}) {
   if (isFresh(cached)) return cached.data;
 
   const media = ctx.media ?? await getMedia(anilistId);
-  const titles = buildTitles(media, ctx.anizip);
-  const candidates = await findTopSlugs(titles, searchFn);
+  const malId = media?.idMal ?? ctx.anizip?.mappings?.mal_id ?? null;
+
+  // 1. Direct Static Map check (MAL ID or AniList ID) -> 0ms lookup!
+  const mappedSlug = getMappedSlug(malId, anilistId);
+  if (mappedSlug) {
+    const data = {
+      slug: mappedSlug,
+      title: media?.title?.romaji || media?.title?.english || mappedSlug,
+      mode: "local",
+      offset: 0,
+      score: 1.0,
+      source: "static_map",
+    };
+    set(cacheKey, data, SHOW_IDENTITY_TTL);
+    return data;
+  }
+
+  // 2. High-speed dynamic search
   const expected = expectedCount(media, ctx.anizip);
-  const offset = await getPrequelOffset(anilistId).catch(() => 0);
-  const isSingleMovie = String(media?.format ?? "").toUpperCase() === "MOVIE" || expected === 1;
-  const selected = await selectSeries(candidates, scrapeSeries, expected, media?.status, offset, {
-    minScore: isSingleMovie ? 0.9 : 0.65,
-  });
-  if (!selected) throw new Error(`AnimeGG match not found for AniList ${anilistId}`);
-  const data = { slug: selected.slug, title: selected.title, mode: selected.mode, offset, score: selected.score };
+  const targetTitles = [
+    media?.title?.romaji,
+    media?.title?.english,
+    ...(media?.synonyms || []),
+  ].filter(Boolean);
+
+  // Search using MAL Romaji title first (closest to AnimeGG naming), then English
+  const primaryQuery = media?.title?.romaji || media?.title?.english || "";
+  let candidates = await search(primaryQuery);
+
+  let scored = candidates.map((c) => ({
+    ...c,
+    score: scoreCandidate(c, targetTitles, expected),
+  })).sort((a, b) => b.score - a.score);
+
+  // If top candidate is not high-confidence, try franchise base query (without Season/Part suffixes)
+  if (!scored.length || scored[0].score < 0.65) {
+    const baseQuery = primaryQuery
+      .replace(/\b(season\s*\d+|part\s*\d+|\d+nd\s*season|\d+rd\s*season|\d+th\s*season)\b/gi, "")
+      .replace(/[:\-–—].*$/, "")
+      .trim();
+
+    if (baseQuery && baseQuery.toLowerCase() !== primaryQuery.toLowerCase()) {
+      const fallbackCandidates = await search(baseQuery);
+      const seen = new Set(candidates.map((c) => c.slug));
+      for (const fc of fallbackCandidates) {
+        if (!seen.has(fc.slug)) candidates.push(fc);
+      }
+      scored = candidates.map((c) => ({
+        ...c,
+        score: scoreCandidate(c, targetTitles, expected),
+      })).sort((a, b) => b.score - a.score);
+    }
+  }
+
+  // Also check English title if Romaji was different and score is still low
+  if ((!scored.length || scored[0].score < 0.65) && media?.title?.english && media.title.english !== primaryQuery) {
+    const enCandidates = await search(media.title.english);
+    const seen = new Set(candidates.map((c) => c.slug));
+    for (const ec of enCandidates) {
+      if (!seen.has(ec.slug)) candidates.push(ec);
+    }
+    scored = candidates.map((c) => ({
+      ...c,
+      score: scoreCandidate(c, targetTitles, expected),
+    })).sort((a, b) => b.score - a.score);
+  }
+
+  const best = scored.find((c) => c.score >= 0.5);
+  if (!best) throw new Error(`AnimeGG match not found for AniList ${anilistId}`);
+
+  const data = {
+    slug: best.slug,
+    title: best.title,
+    mode: "local",
+    offset: 0,
+    score: Number(best.score.toFixed(3)),
+    source: "dynamic_search",
+  };
   set(cacheKey, data, SHOW_IDENTITY_TTL);
   return data;
 }
@@ -213,17 +345,40 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
   const episodes = await scrapeSeries(series.slug);
   const ep = episodes.find((e) => e.number === providerEp);
   if (!ep) return json({ error: `AnimeGG episode ${providerEp} not found` }, 404);
-  const watch = await scrapeEpisodeWatch(ep.epSlug, audio);
-  const topStream = watch.streams.find((s) => s.type === "hls" || s.type === "mp4") || watch.streams[0];
+  let watch = await scrapeEpisodeWatch(ep.epSlug, audio);
+  let effectiveAudio = audio;
+
+  // If the requested audio track (e.g. sub) is not available on AnimeGG for this episode,
+  // fallback to any available audio track so the video plays instead of returning null
+  if (!watch.streams.length && audio !== "all") {
+    const fallbackWatch = await scrapeEpisodeWatch(ep.epSlug, "all");
+    if (fallbackWatch.streams.length) {
+      watch = fallbackWatch;
+      effectiveAudio = watch.streams[0]?.audio || audio;
+    }
+  }
+
+  const qualityWeight = (q) => {
+    const n = parseInt(q, 10);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const directStreams = watch.streams.filter((s) => s.type === "hls" || s.type === "mp4");
+  const topStream = [...directStreams].sort((a, b) => qualityWeight(b.quality) - qualityWeight(a.quality))[0] || watch.streams[0];
+
+  if (topStream) {
+    for (const s of watch.streams) {
+      s.isActive = s.url === topStream.url && s.quality === topStream.quality;
+    }
+  }
 
   return json({
     anilistId: Number(anilistId),
     episode: Number(epNum),
     providerEpisode: providerEp,
-    audio,
+    audio: effectiveAudio,
+    requestedAudio: audio,
     title: watch.title,
     stream_url: topStream?.url || null,
-    proxied_stream_url: topStream?.proxied_url || topStream?.url || null,
     streams: watch.streams,
   });
 }
@@ -231,7 +386,7 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
 async function handleStream(anilistId, audio, epNum) {
   const watchResp = await handleWatch(anilistId, audio, epNum);
   const data = await watchResp.json();
-  const target = data.proxied_stream_url || data.stream_url;
+  const target = data.stream_url;
   if (!target) return json({ error: "Stream not found" }, 404);
   return new Response(null, {
     status: 302,
@@ -247,7 +402,14 @@ export default {
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,OPTIONS", "Access-Control-Allow-Headers": "*" } });
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET,OPTIONS",
+          "Access-Control-Allow-Headers": "*",
+        },
+      });
     }
     try {
       const m = url.pathname.match(/^\/watch\/animegg\/(\d+)\/(sub|dub)\/animegg-(\d+)\/?$/);

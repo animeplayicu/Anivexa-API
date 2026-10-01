@@ -9,6 +9,7 @@ import {
   json,
 } from "../core/new-provider-utils.js";
 import { get, set, isFresh, SHOW_IDENTITY_TTL } from "../core/smartcache.js";
+import { MAL_TO_ANIWAVES, ANILIST_TO_ANIWAVES } from "../mappings/aniwaves.js";
 
 const BASE = "https://aniwaves.ru";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
@@ -39,15 +40,12 @@ function formatName(value) {
 
 function searchQueries(titles) {
   const queries = new Set();
-  for (const raw of titles.slice(0, 8)) {
+  for (const raw of titles.slice(0, 4)) {
     const title = String(raw || "").replace(/\s+/g, " ").trim();
     if (!title) continue;
     queries.add(title);
     const plain = title.replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/g, " ").trim();
     if (plain.length >= 3) queries.add(plain);
-    const words = plain.split(/\s+/).filter(Boolean);
-    if (words.length > 4) queries.add(words.slice(0, 4).join(" "));
-    if (words.length > 6) queries.add(words.slice(0, 6).join(" "));
     const family = plain
       .replace(/\b(?:the\s+)?final\s+chapters?\b/gi, " ")
       .replace(/\bfinal\s+(?:arc|edition)\b/gi, " ")
@@ -57,9 +55,9 @@ function searchQueries(titles) {
       .replace(/\b(?:final|special)\s*(?:\d+|one|two|three|four)?\b/gi, " ")
       .replace(/\s+/g, " ")
       .trim();
-    if (family.length >= 3) queries.add(family);
+    if (family.length >= 3 && family !== plain) queries.add(family);
   }
-  return [...queries].filter((query) => query.length >= 3).slice(0, 18);
+  return [...queries].filter((query) => query.length >= 3).slice(0, 3);
 }
 
 async function fetchText(url, headers = {}) {
@@ -179,11 +177,11 @@ function validateCandidate(candidate, media, titles, expected) {
   const titleScore = candidateTitleScore(titles, candidate);
   const expectedType = formatName(media?.format);
   const expectedYear = Number(media?.startDate?.year ?? media?.seasonYear ?? 0) || null;
-  if (titleScore < 0.68) return null;
+  if (titleScore < 0.60) return null;
   if (expectedType && candidate.type && expectedType !== candidate.type) return null;
-  if (expectedYear && candidate.year && expectedYear !== candidate.year) return null;
+  if (expectedYear && candidate.year && Math.abs(expectedYear - candidate.year) > 1) return null;
   const coverage = coverageScore(candidate, expected, media?.status);
-  if (expected >= 6 && coverage < 0.8) return null;
+  if (media?.status === "FINISHED" && expected >= 6 && coverage < 0.8) return null;
   const score = titleScore * 0.72 + (expectedType && candidate.type === expectedType ? 0.14 : 0.07) + (expectedYear && candidate.year === expectedYear ? 0.1 : 0.04) + coverage * 0.04;
   return { ...candidate, titleScore, coverage, score };
 }
@@ -193,31 +191,60 @@ async function resolveSeries(anilistId, ctx = {}) {
   const cached = get(cacheKey);
   if (isFresh(cached)) return cached.data;
   const media = ctx.media ?? await getMedia(anilistId);
+
+  // 1. Static seed mapping lookup (0ms)
+  const mappedSlug = ANILIST_TO_ANIWAVES[anilistId] || (media?.idMal ? MAL_TO_ANIWAVES[media.idMal] : null);
+  if (mappedSlug) {
+    const siteId = Number(mappedSlug.match(/-(\d+)$/)?.[1]);
+    const detail = await fetchDetail({ slug: mappedSlug, siteId, title: "" }).catch(() => null);
+    if (detail) {
+      const data = {
+        siteId: detail.siteId || siteId,
+        slug: detail.slug,
+        title: detail.title,
+        score: 1.0,
+        matchScore: 1.0,
+        episodeCount: detail.episodes?.available ?? 0,
+      };
+      set(cacheKey, data, SHOW_IDENTITY_TTL);
+      return data;
+    }
+  }
+
+  // 2. Fast sequential search queries (early stop once candidates found)
   const titles = buildTitles(media, ctx.anizip);
   const expected = expectedCount(media, ctx.anizip);
   const discovered = new Map();
-  await Promise.all(searchQueries(titles).map(async (query) => {
+  for (const query of searchQueries(titles)) {
     try {
-      for (const candidate of await search(query)) if (!discovered.has(candidate.slug)) discovered.set(candidate.slug, candidate);
+      const results = await search(query);
+      for (const candidate of results) {
+        if (!discovered.has(candidate.slug)) discovered.set(candidate.slug, candidate);
+      }
+      if (discovered.size >= 4) break;
     } catch {}
-  }));
+  }
+
+  // 3. Score candidates and fetch details for at most top 3
   const shortlist = [...discovered.values()]
     .map((candidate) => ({ candidate, score: candidateTitleScore(titles, candidate) }))
     .filter((item) => item.score >= 0.5)
     .sort((left, right) => right.score - left.score)
-    .slice(0, 12)
+    .slice(0, 3)
     .map((item) => item.candidate);
+
   const details = await Promise.all(shortlist.map((candidate) => fetchDetail(candidate).catch(() => null)));
   const valid = details
     .filter(Boolean)
     .map((candidate) => validateCandidate(candidate, media, titles, expected))
     .filter(Boolean)
     .sort((left, right) => right.score - left.score);
+
   const selected = valid[0];
-  const runnerUp = valid[1];
-  if (!selected || selected.score < 0.82 || runnerUp && selected.score - runnerUp.score < 0.08) {
+  if (!selected || selected.score < 0.65) {
     throw new Error(`AniWaves match not confident for AniList ${anilistId}`);
   }
+
   const data = {
     siteId: selected.siteId,
     slug: selected.slug,
@@ -418,14 +445,8 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
     intro ??= skipRange(skip.intro);
     outro ??= skipRange(skip.outro);
     for (const stream of item.direct) {
-      const isPlayable = stream.type === "hls" || stream.url.includes(".m3u8") || stream.url.includes(".mp4");
-      const proxied = isPlayable
-        ? `/proxy?url=${encodeURIComponent(stream.url)}&ref=${encodeURIComponent(sourceReferer)}`
-        : undefined;
-
       streams.push({
         url: stream.url,
-        proxied_url: proxied,
         type: stream.type,
         server: item.server.server,
         referer: sourceReferer,
@@ -447,7 +468,7 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
     const failure = settled.find((item) => item.error)?.error;
     throw failure ?? new Error(`AniWaves sources unavailable for episode ${epNum}`);
   }
-  const topStream = streams.find((s) => s.type === "hls") || streams[0];
+  const topStream = streams.find((s) => s.isActive) || streams.find((s) => s.type === "hls") || streams[0];
 
   return json({
     anilistId: Number(anilistId),
@@ -457,7 +478,6 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
     intro,
     outro,
     stream_url: topStream?.url || null,
-    proxied_stream_url: topStream?.proxied_url || topStream?.url || null,
     streams,
   });
 }
@@ -465,7 +485,7 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
 async function handleStream(anilistId, audio, epNum) {
   const watchResp = await handleWatch(anilistId, audio, epNum);
   const data = await watchResp.json();
-  const target = data.proxied_stream_url || data.stream_url;
+  const target = data.stream_url;
   if (!target) return json({ error: "Stream not found" }, 404);
   return new Response(null, {
     status: 302,

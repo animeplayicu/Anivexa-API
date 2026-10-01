@@ -37,6 +37,5 @@ export async function extractDataSv(embedUrl, { fetchImpl = fetch, userAgent = D
     }
   }));
   const valid = available.filter(Boolean);
-  if (!valid.length) throw new Error("DATASV response has no available sources");
-  return valid;
+  return valid.length ? valid : sources;
 }

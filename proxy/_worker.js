@@ -139,11 +139,27 @@ function detectDefaultHeaders(targetUrl) {
     };
   }
 
-  // Aniwave / Vidstream / MegaF
-  if (host.includes("aniwave") || host.includes("aniwaves") || host.includes("vidstream") || host.includes("megaf")) {
+  // Aniwave / Vidstream / MegaF / EchoVideo
+  if (host.includes("aniwave") || host.includes("aniwaves") || host.includes("vidstream") || host.includes("megaf") || host.includes("echovideo")) {
     return {
-      referer: "https://aniwaves.ru/",
-      origin: "https://aniwaves.ru",
+      referer: "https://play.echovideo.ru/",
+      origin: "https://play.echovideo.ru",
+    };
+  }
+
+  // AniZone / Vid-CDN
+  if (host.includes("vid-cdn") || host.includes("anizone")) {
+    return {
+      referer: "https://anizone.to/",
+      origin: "https://anizone.to",
+    };
+  }
+
+  // Shiro
+  if (host.includes("shiro")) {
+    return {
+      referer: "https://shiro.so/",
+      origin: "https://shiro.so",
     };
   }
 
@@ -152,6 +168,30 @@ function detectDefaultHeaders(targetUrl) {
     referer: `${targetUrl.origin}/`,
     origin: targetUrl.origin,
   };
+}
+
+let shiroCookieCache = null;
+let shiroCookieExpiry = 0;
+
+async function getShiroProxyCookie(forceRefresh = false) {
+  if (!forceRefresh && shiroCookieCache && Date.now() < shiroCookieExpiry) {
+    return shiroCookieCache;
+  }
+  for (const url of ["https://shiro.so/anime/x/1", "https://shiro.so/"]) {
+    try {
+      const res = await fetch(url, { headers: { "User-Agent": DEFAULT_UA } });
+      const cookies = typeof res.headers.getSetCookie === "function"
+        ? res.headers.getSetCookie()
+        : [res.headers.get("set-cookie")].filter(Boolean);
+      const match = (cookies.find(c => c && c.startsWith("shiro_watch=")) || "").split(";")[0];
+      if (match) {
+        shiroCookieCache = match;
+        shiroCookieExpiry = Date.now() + 23 * 60 * 60 * 1000;
+        return match;
+      }
+    } catch {}
+  }
+  return shiroCookieCache;
 }
 
 function buildProxiedUrl(proxyOrigin, targetUrlStr, context) {
@@ -319,6 +359,12 @@ async function handleRequest(request, env = {}, ctx = null) {
     } catch {}
   }
 
+  // Auto-inject shiro_watch cookie for Shiro stream playback
+  if (targetUrl.hostname.toLowerCase().includes("shiro") && !upstreamHeaders.has("Cookie")) {
+    const sc = await getShiroProxyCookie();
+    if (sc) upstreamHeaders.set("Cookie", sc);
+  }
+
   let upstreamResponse;
   try {
     upstreamResponse = await fetch(targetUrl.href, {
@@ -340,60 +386,24 @@ async function handleRequest(request, env = {}, ctx = null) {
     );
   }
 
+  // If Shiro returns 403 (cookie expired), refresh cookie and retry once
+  if (upstreamResponse?.status === 403 && targetUrl.hostname.toLowerCase().includes("shiro")) {
+    const freshCookie = await getShiroProxyCookie(true);
+    if (freshCookie) {
+      upstreamHeaders.set("Cookie", freshCookie);
+      try {
+        upstreamResponse = await fetch(targetUrl.href, {
+          method: request.method,
+          headers: upstreamHeaders,
+          redirect: "follow",
+        });
+      } catch {}
+    }
+  }
+
   // Final URL after any redirects
   const finalBaseUrl = upstreamResponse.url || targetUrl.href;
   const rawContentType = (upstreamResponse.headers.get("content-type") || "").toLowerCase();
-
-  const isM3U8Url =
-    targetUrl.pathname.endsWith(".m3u8") ||
-    targetUrl.pathname.endsWith(".key") ||
-    rawContentType.includes("application/vnd.apple.mpegurl") ||
-    rawContentType.includes("application/x-mpegurl") ||
-    rawContentType.includes("audio/x-mpegurl");
-
-  // If this might be an M3U8 playlist or encryption key
-  if (isM3U8Url) {
-    const rawText = await upstreamResponse.text();
-
-    // Check if plain M3U8 or encrypted FlixCloud manifest
-    const decryptedText = decryptFlixManifest(rawText, keyParam);
-
-    if (decryptedText.startsWith("#EXTM3U")) {
-      const rewritten = rewriteM3U8(decryptedText, finalBaseUrl, proxyOrigin, context);
-      const isMaster = targetUrl.pathname.endsWith("master.m3u8");
-      const cacheControl = isMaster
-        ? "public, max-age=600, s-maxage=600"
-        : "public, max-age=7200, s-maxage=7200";
-
-      const playlistResponse = new Response(rewritten, {
-        status: 200,
-        headers: {
-          ...CORS_HEADERS,
-          "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
-          "Cache-Control": cacheControl,
-          "CDN-Cache-Control": cacheControl,
-          "Cloudflare-CDN-Cache-Control": cacheControl,
-        },
-      });
-
-      if (cache && request.method === "GET") {
-        ctx?.waitUntil?.(cache.put(request, playlistResponse.clone()));
-      }
-
-      return playlistResponse;
-    }
-
-    // Binary key or other text response
-    return new Response(rawText, {
-      status: upstreamResponse.status,
-      headers: {
-        ...CORS_HEADERS,
-        "Content-Type": rawContentType || "application/octet-stream",
-        "Cache-Control": "public, max-age=86400, s-maxage=86400",
-        "CDN-Cache-Control": "public, max-age=86400",
-      },
-    });
-  }
 
   // For MP4 files (e.g. Animegg / Vidcache): stream directly with Range & 206 Partial Content support
   const isMp4 =
@@ -424,12 +434,80 @@ async function handleRequest(request, env = {}, ctx = null) {
     });
   }
 
-  // For media segments (.ts, .m4s, disguised .png / .webp chunks, etc.)
+  // Read raw payload for playlists and media segments
   const arrayBuf = await upstreamResponse.arrayBuffer();
+  const rawBytes = new Uint8Array(arrayBuf);
+
+  // Check if content is an M3U8 playlist directly from header bytes
+  const isDirectExtM3U =
+    rawBytes.length >= 7 &&
+    rawBytes[0] === 0x23 && // '#'
+    rawBytes[1] === 0x45 && // 'E'
+    rawBytes[2] === 0x58 && // 'X'
+    rawBytes[3] === 0x54 && // 'T'
+    rawBytes[4] === 0x4d && // 'M'
+    rawBytes[5] === 0x33 && // '3'
+    rawBytes[6] === 0x55;   // 'U'
+
+  const isM3U8Url =
+    isDirectExtM3U ||
+    targetUrl.pathname.endsWith(".m3u8") ||
+    targetUrl.search.includes(".m3u8") ||
+    targetUrl.href.includes(".m3u8") ||
+    targetUrl.pathname.endsWith(".key") ||
+    rawContentType.includes("application/vnd.apple.mpegurl") ||
+    rawContentType.includes("application/x-mpegurl") ||
+    rawContentType.includes("audio/x-mpegurl");
+
+  // If this might be an M3U8 playlist or encryption key
+  if (isM3U8Url) {
+    const rawText = new TextDecoder("utf-8").decode(rawBytes);
+
+    // Check if plain M3U8 or encrypted FlixCloud manifest
+    const decryptedText = decryptFlixManifest(rawText, keyParam);
+
+    if (decryptedText.startsWith("#EXTM3U")) {
+      const rewritten = rewriteM3U8(decryptedText, finalBaseUrl, proxyOrigin, context);
+      const isMaster = targetUrl.pathname.endsWith("master.m3u8");
+      const cacheControl = isMaster
+        ? "public, max-age=600, s-maxage=600"
+        : "public, max-age=7200, s-maxage=7200";
+
+      const playlistResponse = new Response(rewritten, {
+        status: 200,
+        headers: {
+          ...CORS_HEADERS,
+          "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
+          "Cache-Control": cacheControl,
+          "CDN-Cache-Control": cacheControl,
+          "Cloudflare-CDN-Cache-Control": cacheControl,
+        },
+      });
+
+      if (cache && request.method === "GET") {
+        ctx?.waitUntil?.(cache.put(request, playlistResponse.clone()));
+      }
+
+      return playlistResponse;
+    }
+
+    // Binary key or other text response
+    return new Response(arrayBuf, {
+      status: upstreamResponse.status,
+      headers: {
+        ...CORS_HEADERS,
+        "Content-Type": rawContentType || "application/octet-stream",
+        "Cache-Control": "public, max-age=86400, s-maxage=86400",
+        "CDN-Cache-Control": "public, max-age=86400",
+      },
+    });
+  }
+
+  // For media segments (.ts, .m4s, disguised .png / .webp chunks, etc.)
   const { data: segmentBytes, isTs } = unwrapFlixSegment(arrayBuf);
 
   const responseHeaders = new Headers(CORS_HEADERS);
-  if (isTs) {
+  if (isTs || (segmentBytes.length > 0 && segmentBytes[0] === 0x47)) {
     responseHeaders.set("Content-Type", "video/mp2t");
   } else if (rawContentType) {
     responseHeaders.set("Content-Type", rawContentType);

@@ -14,6 +14,7 @@ import senshiHandler               from "./providers/senshi.js";
 import kaaHandler                  from "./providers/kickassanime.js";
 import animedunyaHandler           from "./providers/animedunya.js";
 import animeonsenHandler           from "./providers/animeonsen.js";
+import shiroHandler                from "./providers/shiro.js";
 import { getEpisodesResponse, getFilteredEpisodesResponse } from "./core/episode-cache.js";
 import { resolveProviders }         from "./core/episode-strategy.js";
 import { getAsync, setAsync, isFresh, mapTTL, WATCH_TTL, _CACHE_ENABLED } from "./core/smartcache.js";
@@ -55,7 +56,9 @@ async function cachedWatch(cacheKey, handlerFn, ttl = WATCH_TTL) {
     if (response.status === 200) {
       try {
         const data = await response.clone().json();
-        await setAsync(cacheKey, data, ttl);
+        if (data?.stream_url || (Array.isArray(data?.streams) && data.streams.length > 0)) {
+          await setAsync(cacheKey, data, ttl);
+        }
       } catch {}
     }
     return response;
@@ -289,6 +292,15 @@ export default {
       );
     }
 
+    m = path.match(/^\/watch\/shiro\/(\d+)\/(sub|dub|hsub)\/shiro-(\d+)\/?$/);
+    if (m) {
+      const [, id, audio, ep] = m;
+      return cachedWatch(
+        `watch:shiro:${id}:${audio}:${ep}`,
+        () => shiroHandler.fetch(request)
+      );
+    }
+
     return json({
       name: "Anivexa API 2.2.1",
       cache: _CACHE_ENABLED,
@@ -307,6 +319,7 @@ export default {
         "kaa",
         "animedunya",
         "animeonsen",
+        "shiro",
       ],
       routes: [
         "/map/:anilistId",
@@ -327,6 +340,7 @@ export default {
         "/watch/kaa/:id/sub|dub/kaa-:ep",
         "/watch/animedunya/:id/sub|dub/animedunya-:ep",
         "/watch/animeonsen/:id/sub|dub/animeonsen-:ep",
+        "/watch/shiro/:id/sub|dub|hsub/shiro-:ep",
       ],
     });
   },

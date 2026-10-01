@@ -249,14 +249,11 @@ async function handleWatch3(anilistId, audio, epNum, origin) {
   const seenStreamUrls = new Set();
   const cleanStreams = streams.map(({ server: source, stream: item, index }) => {
     const key = item.playlist_key ?? item.key ?? null;
-    let proxied = `/proxy?url=${encodeURIComponent(item.url)}&ref=${encodeURIComponent("https://flixcloud.cc/")}`;
-    if (key) proxied += `&key=${encodeURIComponent(key)}`;
     return {
       server: source.serverName,
       audio: source.dataType,
       index,
       url: item.url,
-      proxied_url: proxied,
       type: "hls",
       embed: source.dataLink,
       key,
@@ -273,9 +270,6 @@ async function handleWatch3(anilistId, audio, epNum, origin) {
     return true;
   });
   const embeds = servers.map((s) => ({ name: s.serverName, type: s.dataType, url: s.dataLink }));
-  const topKey = stream.playlist_key || stream.key || "";
-  let topProxied = `/proxy?url=${encodeURIComponent(stream.url)}&ref=${encodeURIComponent("https://flixcloud.cc/")}`;
-  if (topKey) topProxied += `&key=${encodeURIComponent(topKey)}`;
 
   return json3({
     anime: title2,
@@ -284,7 +278,6 @@ async function handleWatch3(anilistId, audio, epNum, origin) {
     audio,
     server,
     stream_url: stream.url,
-    proxied_stream_url: topProxied,
     streams: cleanStreams,
     subtitles: stream.subtitles,
     thumbnails_vtt: stream.thumbnails_vtt,

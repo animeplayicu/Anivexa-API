@@ -59,7 +59,7 @@ function resolveShared(anilistId, freshMedia = false) {
 }
 
 async function clearProviderCache(anilistId, media) {
-  for (const p of ["pahe", "manga", "reanime", "anikoto", "animegg", "anineko", "anidbapp", "anizone", "aniwaves", "animeonsen"]) {
+  for (const p of ["pahe", "manga", "reanime", "anikoto", "animegg", "anineko", "anidbapp", "anizone", "aniwaves", "animeonsen", "shiro"]) {
     await delAsync(`epv:${p}:${anilistId}`);
   }
   if (media?.idMal) {

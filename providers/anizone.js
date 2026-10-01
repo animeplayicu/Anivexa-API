@@ -342,12 +342,13 @@ async function loadPage(state, slug) {
   };
 }
 
-async function scrapeSeries(slug, limit, maxPages) {
+async function scrapeSeries(slug, limit, maxPages, targetEpisode) {
   const initial = await fetchPage(`/anime/${slug}`);
   let state = initialPage(initial.raw, initial.cookies);
   const items = [...state.items];
   let pages = 1;
-  while (state.hasMore && state.cursor && items.length < limit && pages < maxPages) {
+  const hasTarget = () => targetEpisode && items.some((item) => episodeNumber(item) === targetEpisode);
+  while (!hasTarget() && state.hasMore && state.cursor && items.length < limit && pages < maxPages) {
     state = await loadPage(state, slug);
     items.push(...state.items);
     pages++;
@@ -415,7 +416,7 @@ async function seriesEpisodes(anilistId, ctx = {}) {
   const expected = expectedCount(media, ctx.anizip);
   const limit = expected ? expected + offset : Infinity;
   const maxPages = Number.isFinite(ctx.maxPages) ? Math.max(1, ctx.maxPages) : Infinity;
-  const rawEpisodes = await scrapeSeries(series.slug, limit, maxPages);
+  const rawEpisodes = await scrapeSeries(series.slug, limit, maxPages, ctx.targetEpisode);
   const mode = chooseMode(rawEpisodes, expected, offset);
   return {
     media,
@@ -468,7 +469,7 @@ async function scrapeWatch(slug, episode) {
 }
 
 async function handleWatch(anilistId, audio, epNum, ctx = {}) {
-  const data = await seriesEpisodes(anilistId, ctx);
+  const data = await seriesEpisodes(anilistId, { ...ctx, targetEpisode: Number(epNum) });
   const episode = data.episodes.find((item) => {
     const number = data.mode === "offset" ? item.number - data.offset : item.number;
     return number === Number(epNum);
