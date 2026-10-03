@@ -110,5 +110,5 @@ process.on("unhandledRejection", (reason) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Anivexa dev server → http://localhost:${PORT}`);
+  console.log(`Metsu dev server → http://localhost:${PORT}`);
 });

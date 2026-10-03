@@ -1,5 +1,5 @@
 {
-  "name": "all-api",
+  "name": "metsu-api",
   "version": "2.2.1",
   "type": "module",
   "main": "server.js",

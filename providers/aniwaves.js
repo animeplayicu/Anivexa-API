@@ -147,12 +147,27 @@ async function fetchDetail(candidate) {
   const premiered = detailField(html, "Premiered");
   const aired = detailField(html, "Date aired");
   const year = Number((aired.match(/\d{4}/)?.[0] ?? premiered.match(/\d{4}/)?.[0] ?? ""));
+
+  const realSiteId = Number(
+    html.match(/name=["']show_id["']\s+value=["'](\d+)["']/i)?.[1]
+    || html.match(/id=["']watch-main["'][^>]*data-id=["'](\d+)["']/i)?.[1]
+    || html.match(/data-id=["'](\d+)["'][^>]*id=["']watch-main["']/i)?.[1]
+    || html.match(/["']anime_id["']:\s*["'](\d+)["']/i)?.[1]
+  );
+
+  const episodes = parseEpisodeCount(detailField(html, "Episodes"));
+  const siteId = (Number.isFinite(realSiteId) && realSiteId > 0) ? realSiteId : candidate.siteId;
+
+  // Reject dead pages, orphan pages, or pages with show_id 0
+  if (!siteId || siteId === 0) return null;
+
   return {
     ...candidate,
+    siteId,
     title: candidate.title || stripHtml(html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] ?? ""),
     type: formatName(detailField(html, "Type")),
     year: Number.isFinite(year) ? year : null,
-    episodes: parseEpisodeCount(detailField(html, "Episodes")),
+    episodes,
   };
 }
 
@@ -197,9 +212,9 @@ async function resolveSeries(anilistId, ctx = {}) {
   if (mappedSlug) {
     const siteId = Number(mappedSlug.match(/-(\d+)$/)?.[1]);
     const detail = await fetchDetail({ slug: mappedSlug, siteId, title: "" }).catch(() => null);
-    if (detail) {
+    if (detail && detail.siteId > 0 && (detail.episodes?.available > 0 || detail.episodes?.total > 0)) {
       const data = {
-        siteId: detail.siteId || siteId,
+        siteId: detail.siteId,
         slug: detail.slug,
         title: detail.title,
         score: 1.0,

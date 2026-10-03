@@ -1,16 +1,12 @@
 <div align="center">
 
-
-<img src="docs/logo.svg" width="80" height="80"/>
-
-
-# Anivexa API 2.2.1
+# Metsu API 2.2.1
 
 **Anime streaming aggregator API — one endpoint, all your sources.**
 
-![Views](https://visitor-badge.laobi.icu/badge?page_id=walterwhite-69.Anivexa-API)
+![Views](https://visitor-badge.laobi.icu/badge?page_id=walterwhite-69.Metsu-API)
 [![Discord](https://img.shields.io/badge/Join%20Discord-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/MARQ9z9QSX)
-[![GitHub stars](https://img.shields.io/github/stars/walterwhite-69/Anivexa-API?style=flat-square&color=yellow)](https://github.com/walterwhite-69/Anivexa-API/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/walterwhite-69/Metsu-API?style=flat-square&color=yellow)](https://github.com/walterwhite-69/Metsu-API/stargazers)
 
 </div>
 
@@ -191,8 +187,8 @@ The API does not expose a public ReAnime `/proxy` route. If you need direct cust
 ## Self-hosted
 
 ```bash
-git clone https://github.com/walterwhite-69/Anivexa-API
-cd Anivexa-API
+git clone https://github.com/walterwhite-69/Metsu-API
+cd Metsu-API
 npm install
 cp .env.example .env
 node server.js

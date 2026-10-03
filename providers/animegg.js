@@ -129,8 +129,9 @@ async function scrapeEpisodeWatch(epSlug, audio) {
     const sources = await scrapeEmbed(tab.embedId);
     const streams = sources.map((s, j) => {
       const ref = `${new URL(tab.embedUrl).origin}/`;
-      return {
+      const streamObj = {
         url: s.url,
+        proxied_url: `/proxy?url=${encodeURIComponent(s.url)}&ref=${encodeURIComponent(ref)}`,
         type: s.url.includes(".m3u8") ? "hls" : "mp4",
         quality: s.quality,
         backup: s.backup,
@@ -141,6 +142,10 @@ async function scrapeEpisodeWatch(epSlug, audio) {
         priority: tabs.length - i,
         isActive: i === 0 && j === 0,
       };
+      if (s.backup && s.backup.startsWith("http")) {
+        streamObj.proxied_backup = `/proxy?url=${encodeURIComponent(s.backup)}&ref=${encodeURIComponent(ref)}`;
+      }
+      return streamObj;
     });
     streams.push({
       url: tab.embedUrl,
@@ -379,6 +384,7 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
     requestedAudio: audio,
     title: watch.title,
     stream_url: topStream?.url || null,
+    proxied_stream_url: topStream?.proxied_url || topStream?.url || null,
     streams: watch.streams,
   });
 }
@@ -386,7 +392,7 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
 async function handleStream(anilistId, audio, epNum) {
   const watchResp = await handleWatch(anilistId, audio, epNum);
   const data = await watchResp.json();
-  const target = data.stream_url;
+  const target = data.proxied_stream_url || data.stream_url;
   if (!target) return json({ error: "Stream not found" }, 404);
   return new Response(null, {
     status: 302,

@@ -302,7 +302,7 @@ export default {
     }
 
     return json({
-      name: "Anivexa API 2.2.1",
+      name: "Metsu API 2.2.1",
       cache: _CACHE_ENABLED,
       providers: [
         "mkissa",

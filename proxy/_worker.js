@@ -546,7 +546,7 @@ function servePlayerUI(proxyOrigin, initialUrl = "", initialKey = "", initialRef
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Anivexa Stream Proxy | Cloudflare Pages</title>
+  <title>Metsu Stream Proxy | Cloudflare Pages</title>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -710,7 +710,7 @@ function servePlayerUI(proxyOrigin, initialUrl = "", initialKey = "", initialRef
   <div class="container">
     <div class="header">
       <div class="badge">🚀 Cloudflare Pages / Worker Proxy</div>
-      <h1>Anivexa HLS Stream Proxy</h1>
+      <h1>Metsu HLS Stream Proxy</h1>
       <p>High-speed, zero-bandwidth-drain proxy for Reanime, Anikoto, and HLS streams</p>
     </div>
 
